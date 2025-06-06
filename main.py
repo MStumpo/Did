@@ -92,43 +92,39 @@ def main():
     x = list(batched(flat_x, batch_size))[:-1] #I don't care calling it x again
     y = list(batched(flat_y, batch_size))[:-1]
     data = list(zip(x, y))
-    random.shuffle(data)
 
-    x_shuffled, y_shuffled = zip(*data)
+    device = torch.device("cuda")
 
-    x_shuffled = [torch.stack(i) for i in x_shuffled]
-    y_shuffled = [torch.stack(i) for i in y_shuffled]
-    x_shuffled = torch.stack(x_shuffled)
-    y_shuffled = torch.stack(y_shuffled)
+    flat_x, flat_y = torch.stack(flat_x), torch.stack(flat_y)
 
-    split_idx = int(0.8 * len(x_shuffled))
 
-    x_train = x_shuffled[:split_idx]
-    y_train = y_shuffled[:split_idx]
-    x_test = x_shuffled[split_idx:]
-    y_test = y_shuffled[split_idx:]
+    dataset = TensorDataset(flat_x, flat_y)
+    train_size = int(0.8 * len(dataset))
+    test_size = len(dataset) - train_size
+
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True) #,pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)#, pin_memory=True)
+
+
 
     optimizer = optim.Adam(model.parameters(), lr=1e-5)
     token_loss = nn.CrossEntropyLoss()
 
 
 
-    del x, y, flat_x, flat_y, x_shuffled, y_shuffled
+    del x, y, flat_x, flat_y#, x_shuffled, y_shuffled
 
 
-    #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    device = torch.device("cuda")
 
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
 
 
     model = model.to(device)
-    x_train = x_train.to(device)
-    y_train = y_train.to(device)
-    x_test = x_test.to(device)
-    y_test = y_test.to(device)
+
+
 
     for epoch in range(epochs):
         loss_1_t = 0
@@ -140,9 +136,11 @@ def main():
             if param.requires_grad:
                 print(f"Buffer {name} requires grad, if it's memory then this is an error")
 
-        progress_bar = tqdm(enumerate(zip(x_train, y_train)), total=len(x_train))#, desc=f"Latent loss (av):{loss_1_t}, token_loss (av): {loss_2_t}, memory alloc (GiB):{mem_alloc}", leave=False)
+        progress_bar = tqdm(enumerate(train_loader), total=len(train_loader))#, desc=f"Latent loss (av):{loss_1_t}, token_loss (av): {loss_2_t}, memory alloc (GiB):{mem_alloc}", leave=False)
 
-        for i, (inputs, label) in enumerate(zip(x_train, y_train)):
+        for i, (inputs, label) in enumerate(train_loader):
+            inputs = inputs.to(device , non_blocking=True)
+            label = label.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
             label_temp = label.unsqueeze(1)
@@ -175,7 +173,11 @@ def main():
         v_loss_1_t = 0
         v_loss_2_t = 0
         with torch.no_grad():
-            for i, (inputs, label) in enumerate(zip(x_test, y_test)):
+            for i, (inputs, label) in enumerate(test_loader):
+
+                inputs = inputs.to(device, non_blocking=True)
+                label = label.to(device, non_blocking=True)
+
                 label_temp = label.unsqueeze(1)
                 new_inputs = torch.cat([inputs, label_temp], 1)
 
