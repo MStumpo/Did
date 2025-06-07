@@ -104,8 +104,8 @@ def main():
 
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True) #,pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)#, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True) #,pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True,drop_last=True)#, pin_memory=True)
 
 
 
@@ -127,8 +127,8 @@ def main():
 
 
     for epoch in range(epochs):
-        loss_1_t = 0
-        loss_2_t = 0
+        loss_1_t = torch.tensor(0)
+        loss_2_t = torch.tensor(0)
         model.reset_memory()
         model.train()
         mem_alloc = torch.cuda.memory_allocated(device)/ 1024**3
@@ -152,7 +152,7 @@ def main():
 
             cos_sim = F.cosine_similarity(latent, target_latent, dim=-1)
             smoothL1 = F.smooth_l1_loss(latent,target_latent)
-            loss_latent = (1 - cos_sim.mean())*0.5 + (smoothL1.mean())*0.5
+            loss_latent = (1 - cos_sim.mean())*1 + (smoothL1.mean())*1
 
             loss_t = token_loss(outputs[:,-1,:], label) # Decide between choosing last of these or applying commented mean and model outputs 1 token
 
@@ -163,15 +163,19 @@ def main():
             model.memory = model.memory.detach() #Do this if you don't want to explode in tens of gigabytes used by torch
             #model.memory = new_memory_values.clone().detach().requires_grad_(True)   #???
 
-            loss_1_t = (loss_1_t * i + loss_latent) / (i + 1)
-            loss_2_t = (loss_2_t * i + loss_t) / (i + 1)
+            loss_1_t = (loss_1_t.item() * i + loss_latent) / (i + 1)
+            loss_2_t = (loss_2_t.item()* i + loss_t) / (i + 1)
 
-            progress_bar.set_postfix(loss_1_t=loss_1_t.item(), loss_2_t=loss_2_t.item(), mem_alloc= torch.cuda.memory_allocated(device) / 1024**3)
+            progress_bar.set_postfix(loss_1_t=loss_1_t.item(), loss_2_t=loss_2_t.item(), mem_alloc= torch.cuda.memory_allocated() / 1024**3)
             progress_bar.update(1)
 
+
+
+        v_progress_bar = tqdm(enumerate(test_loader), total=len(test_loader))
+
         model.eval()
-        v_loss_1_t = 0
-        v_loss_2_t = 0
+        v_loss_1_t = torch.tensor(0)
+        v_loss_2_t = torch.tensor(0)
         with torch.no_grad():
             for i, (inputs, label) in enumerate(test_loader):
 
@@ -185,14 +189,23 @@ def main():
 
                 target_latent = model.encoder(new_inputs[:, 1:])
 
-                v_loss_latent = (1 - F.cosine_similarity(latent, target_latent, dim=-1).mean())*0.5 + (F.smooth_l1_loss(latent, target_latent, dim=-1).mean())*0.5
-                v_loss_t = token_loss(outputs, label)
+                cos_sim = F.cosine_similarity(latent, target_latent, dim=-1)
+                smoothL1 = F.smooth_l1_loss(latent, target_latent)
+                v_loss_latent = (1 - cos_sim.mean()) * 1 + (smoothL1.mean()) * 1
 
-                v_loss_1_t = (v_loss_1_t * i + v_loss_latent) / (i + 1)
-                v_loss_2_t = (v_loss_2_t * i + v_loss_t) / (i + 1)
+                v_loss_t = token_loss(outputs[:, -1, :],
+                                    label)  # Decide between choosing last of these or applying commented mean and model outputs 1 token
 
-        print(f"Epoch {epoch + 1}: latent loss (av):{loss_1_t}, token_loss (av): {loss_2_t}, val latent loss (av):{v_loss_1_t}, val_token_loss (av):{v_loss_2_t}, memory alloc (GiB): {(torch.cuda.memory_allocated(device)/ 1024**3)}")
 
+                v_loss_1_t = (v_loss_1_t.item() * i + v_loss_latent) / (i + 1)
+                v_loss_2_t = (v_loss_2_t.item() * i + v_loss_t) / (i + 1)
+
+                v_progress_bar.set_postfix(loss_1_t=v_loss_1_t.item(), loss_2_t=v_loss_2_t.item(),
+                                             mem_alloc=torch.cuda.memory_allocated() / 1024 ** 3)
+                v_progress_bar.update(1)
+
+        print(f"Epoch {epoch + 1}: latent loss (av):{loss_1_t.item()}, token_loss (av): {loss_2_t.item()}, val latent loss (av):{v_loss_1_t}, val_token_loss (av):{v_loss_2_t}, memory alloc (GiB): {(torch.cuda.memory_allocated(device)/ 1024**3)}")
+        torch.save(model.state_dict(), "model.pth")
 
 if __name__ == '__main__':
     main()
