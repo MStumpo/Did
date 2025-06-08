@@ -8,12 +8,12 @@ from simple_decoder import SimpleDecoder
 
 class ExampleModel(nn.Module):
     def __init__(self, encoder=None, m_dim=128, token_dim=32, emb_dim=16, dict_size=1024, hidden_dim=64, n_stacks=3,
-                 dropout=0.1, n_heads=8):
+                 dropout=0.1, n_heads=8, n_convs=1):
         super().__init__()
         self.register_buffer('memory', torch.zeros(m_dim, emb_dim), persistent=True)
 
         if encoder is None:
-            self.encoder = LatentEmbedder(token_dim, emb_dim, hidden_dim=hidden_dim)
+            self.encoder = LatentEmbedder(token_dim, emb_dim, hidden_dim=hidden_dim, n_convs=n_convs)
         else:
             self.encoder = encoder
 

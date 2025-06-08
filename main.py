@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from torch.utils.data import DataLoader, TensorDataset, random_split
-#!pip install -U datasets huggingface_hub fsspec #run this if there's an error in dataset loading
+
 from datasets import load_dataset, Dataset
 from itertools import batched
 from crossable_transformer import CrossableTransformer
@@ -17,8 +17,10 @@ from simple_decoder import SimpleDecoder
 from example_model import ExampleModel
 from tqdm import tqdm
 from torchviz import make_dot
+import os
 
-
+#todo make a trainable transformation that allows collapsing of memory back to it's shape instead of (batch_size, shape). We can then unsequeeze in the next read/write
+#Remove token_dim and do embedder directly to embed_dim
 def create_new_token_data(tensor, seq_len):
     total_len = tensor.shape[0]
     n = total_len - seq_len
@@ -42,10 +44,9 @@ def main():
     dropout = 0.1
     dict_size = 16384
 
-    batch_size = 32
+    batch_size = 64
     epochs = 10
     static_seq = 64
-
 
 
 
@@ -53,6 +54,12 @@ def main():
     model = ExampleModel(encoder, m_dim, token_dim, emb_dim, dict_size, hidden_dim, n_stacks, dropout, n_heads)
 
 
+    if os.path.exists("model.pth"):
+        state_dict = torch.load("model.pth")
+        model.memory = torch.zeros(state_dict["memory"].shape)
+        model.load_state_dict(state_dict, strict=False)
+        encoder = model.encoder
+        print("loaded model from save")
 
     '''
     dot = make_dot(model(toy_input), params=dict(model.named_parameters()))
@@ -104,8 +111,8 @@ def main():
 
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True) #,pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True,drop_last=True)#, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=8, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True,drop_last=True, num_workers=8, pin_memory=True)
 
 
 
@@ -129,9 +136,10 @@ def main():
     for epoch in range(epochs):
         loss_1_t = torch.tensor(0)
         loss_2_t = torch.tensor(0)
+        loss_1_t.to(device)
+        loss_2_t.to(device)
         model.reset_memory()
         model.train()
-        mem_alloc = torch.cuda.memory_allocated(device)/ 1024**3
         for name, param in model.named_buffers():
             if param.requires_grad:
                 print(f"Buffer {name} requires grad, if it's memory then this is an error")
@@ -143,12 +151,15 @@ def main():
             label = label.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            label_temp = label.unsqueeze(1)
-            new_inputs = torch.cat([inputs, label_temp], 1)
+
+            with torch.no_grad():
+                label_temp = label.unsqueeze(1)
+                new_inputs = torch.cat([inputs, label_temp], 1)
+                target_latent = model.encoder(new_inputs[:, 1:])
 
             latent, out_temp = model(inputs)
             outputs = model.logits(latent.detach())
-            target_latent = model.encoder(new_inputs[:, 1:])
+
 
             cos_sim = F.cosine_similarity(latent, target_latent, dim=-1)
             smoothL1 = F.smooth_l1_loss(latent,target_latent)
@@ -159,15 +170,19 @@ def main():
             (loss_latent + loss_t).backward(retain_graph=False) #True
 
             optimizer.step()
+            model.memory = model.memory.detach()  # Do this if you don't want to explode in tens of gigabytes used by torch
 
-            model.memory = model.memory.detach() #Do this if you don't want to explode in tens of gigabytes used by torch
-            #model.memory = new_memory_values.clone().detach().requires_grad_(True)   #???
+            with torch.no_grad():
+                loss_1_t = (loss_1_t * i + loss_latent) / (i + 1)
+                loss_2_t = (loss_2_t* i + loss_t) / (i + 1)
 
-            loss_1_t = (loss_1_t.item() * i + loss_latent) / (i + 1)
-            loss_2_t = (loss_2_t.item()* i + loss_t) / (i + 1)
+                progress_bar.set_postfix(loss_1_t=loss_1_t.item(), loss_2_t=loss_2_t.item(), mem_alloc= torch.cuda.memory_allocated() / 1024**3)
+                progress_bar.update(1)
 
-            progress_bar.set_postfix(loss_1_t=loss_1_t.item(), loss_2_t=loss_2_t.item(), mem_alloc= torch.cuda.memory_allocated() / 1024**3)
-            progress_bar.update(1)
+
+            ##########
+            if i == 100:
+                break
 
 
 
@@ -200,11 +215,11 @@ def main():
                 v_loss_1_t = (v_loss_1_t.item() * i + v_loss_latent) / (i + 1)
                 v_loss_2_t = (v_loss_2_t.item() * i + v_loss_t) / (i + 1)
 
-                v_progress_bar.set_postfix(loss_1_t=v_loss_1_t.item(), loss_2_t=v_loss_2_t.item(),
+                v_progress_bar.set_postfix(v_loss_1_t=v_loss_1_t.item(), v_loss_2_t=v_loss_2_t.item(),
                                              mem_alloc=torch.cuda.memory_allocated() / 1024 ** 3)
                 v_progress_bar.update(1)
 
-        print(f"Epoch {epoch + 1}: latent loss (av):{loss_1_t.item()}, token_loss (av): {loss_2_t.item()}, val latent loss (av):{v_loss_1_t}, val_token_loss (av):{v_loss_2_t}, memory alloc (GiB): {(torch.cuda.memory_allocated(device)/ 1024**3)}")
+        #print(f"Epoch {epoch + 1}: latent loss (av):{loss_1_t.item()}, token_loss (av): {loss_2_t.item()}, val latent loss (av):{v_loss_1_t}, val_token_loss (av):{v_loss_2_t}, memory alloc (GiB): {(torch.cuda.memory_allocated(device)/ 1024**3)}")
         torch.save(model.state_dict(), "model.pth")
 
 if __name__ == '__main__':
