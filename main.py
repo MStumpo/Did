@@ -121,7 +121,7 @@ def main():
 
 
 
-    del x, y, flat_x, flat_y#, x_shuffled, y_shuffled
+    del x, y, flat_x, flat_y
 
 
 
@@ -179,20 +179,14 @@ def main():
                 progress_bar.set_postfix(loss_1_t=loss_1_t.item(), loss_2_t=loss_2_t.item(), mem_alloc= torch.cuda.memory_allocated() / 1024**3)
                 progress_bar.update(1)
 
-
-            ##########
-            if i == 100:
-                break
-
-
-
-        v_progress_bar = tqdm(enumerate(test_loader), total=len(test_loader))
+        progress_bar.close()
+        progress_bar = tqdm(enumerate(test_loader), total=len(test_loader))
 
         model.eval()
         v_loss_1_t = torch.tensor(0)
         v_loss_2_t = torch.tensor(0)
-        with torch.no_grad():
-            for i, (inputs, label) in enumerate(test_loader):
+        for i, (inputs, label) in enumerate(test_loader):
+            with torch.no_grad():
 
                 inputs = inputs.to(device, non_blocking=True)
                 label = label.to(device, non_blocking=True)
@@ -215,12 +209,13 @@ def main():
                 v_loss_1_t = (v_loss_1_t.item() * i + v_loss_latent) / (i + 1)
                 v_loss_2_t = (v_loss_2_t.item() * i + v_loss_t) / (i + 1)
 
-                v_progress_bar.set_postfix(v_loss_1_t=v_loss_1_t.item(), v_loss_2_t=v_loss_2_t.item(),
+                progress_bar.set_postfix(v_loss_1_t=v_loss_1_t.item(), v_loss_2_t=v_loss_2_t.item(),
                                              mem_alloc=torch.cuda.memory_allocated() / 1024 ** 3)
-                v_progress_bar.update(1)
+                progress_bar.update(1)
 
         #print(f"Epoch {epoch + 1}: latent loss (av):{loss_1_t.item()}, token_loss (av): {loss_2_t.item()}, val latent loss (av):{v_loss_1_t}, val_token_loss (av):{v_loss_2_t}, memory alloc (GiB): {(torch.cuda.memory_allocated(device)/ 1024**3)}")
         torch.save(model.state_dict(), "model.pth")
+        progress_bar.close()
 
 if __name__ == '__main__':
     main()
