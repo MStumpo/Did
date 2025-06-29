@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+from tokenizers.processors import TemplateProcessing
+
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from datasets import load_dataset, Dataset
@@ -21,6 +23,7 @@ import os
 
 #todo make a trainable transformation that allows collapsing of memory back to it's shape instead of (batch_size, shape). We can then unsequeeze in the next read/write
 #Remove token_dim and do embedder directly to embed_dim
+
 def create_new_token_data(tensor, seq_len):
     total_len = tensor.shape[0]
     n = total_len - seq_len
@@ -48,18 +51,23 @@ def main():
     epochs = 10
     static_seq = 64
 
+    os.environ["TOKENIZERS_PARALLELISM"] = "true"
+
 
 
     encoder = nn.Sequential(nn.Embedding(dict_size, token_dim), LatentEmbedder(token_dim, emb_dim, hidden_dim=hidden_dim))
     model = ExampleModel(encoder, m_dim, token_dim, emb_dim, dict_size, hidden_dim, n_stacks, dropout, n_heads)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
 
-
-    if os.path.exists("model.pth"):
-        state_dict = torch.load("model.pth")
+    if os.path.exists("checkpoint.pt"):
+        checkpoint = torch.load("checkpoint.pt")
         model.memory = torch.zeros(state_dict["memory"].shape)
-        model.load_state_dict(state_dict, strict=False)
-        encoder = model.encoder
-        print("loaded model from save")
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("loaded model/optimizer from save")
+
+
+    print("Model parameters :", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
     '''
     dot = make_dot(model(toy_input), params=dict(model.named_parameters()))
@@ -79,8 +87,17 @@ def main():
 
     tokenizer = Tokenizer(models.BPE())
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    trainer = trainers.BpeTrainer(vocab_size=dict_size)
-    tokenizer.train_from_iterator(" ".join(dataset["text"]), trainer)
+    trainer = trainers.BpeTrainer(vocab_size=dict_size, special_tokens=["[UNK]","[PAD]","[EOS]"])
+    
+    #tokenizer.train_from_iterator("".join(dataset["text"]), trainer)
+    tokenizer.train_from_iterator(dataset["text"], trainer)
+
+    tokenizer.post_processor = TemplateProcessing(
+    single="$A [EOS]",
+    #pair="$A [EOS] $B:1 [EOS]:1",
+    special_tokens=[("[EOS]", tokenizer.token_to_id("[EOS]"))]
+    )
+
 
 
     x, y  = [], []
@@ -116,12 +133,11 @@ def main():
 
 
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
     token_loss = nn.CrossEntropyLoss()
 
 
 
-    del x, y, flat_x, flat_y#, x_shuffled, y_shuffled
+    del x, y, flat_x, flat_y
 
 
 
@@ -179,20 +195,14 @@ def main():
                 progress_bar.set_postfix(loss_1_t=loss_1_t.item(), loss_2_t=loss_2_t.item(), mem_alloc= torch.cuda.memory_allocated() / 1024**3)
                 progress_bar.update(1)
 
-
-            ##########
-            if i == 100:
-                break
-
-
-
-        v_progress_bar = tqdm(enumerate(test_loader), total=len(test_loader))
+        progress_bar.close()
+        progress_bar = tqdm(enumerate(test_loader), total=len(test_loader))
 
         model.eval()
         v_loss_1_t = torch.tensor(0)
         v_loss_2_t = torch.tensor(0)
-        with torch.no_grad():
-            for i, (inputs, label) in enumerate(test_loader):
+        for i, (inputs, label) in enumerate(test_loader):
+            with torch.no_grad():
 
                 inputs = inputs.to(device, non_blocking=True)
                 label = label.to(device, non_blocking=True)
@@ -215,12 +225,17 @@ def main():
                 v_loss_1_t = (v_loss_1_t.item() * i + v_loss_latent) / (i + 1)
                 v_loss_2_t = (v_loss_2_t.item() * i + v_loss_t) / (i + 1)
 
-                v_progress_bar.set_postfix(v_loss_1_t=v_loss_1_t.item(), v_loss_2_t=v_loss_2_t.item(),
+                progress_bar.set_postfix(v_loss_1_t=v_loss_1_t.item(), v_loss_2_t=v_loss_2_t.item(),
                                              mem_alloc=torch.cuda.memory_allocated() / 1024 ** 3)
-                v_progress_bar.update(1)
+                progress_bar.update(1)
 
-        #print(f"Epoch {epoch + 1}: latent loss (av):{loss_1_t.item()}, token_loss (av): {loss_2_t.item()}, val latent loss (av):{v_loss_1_t}, val_token_loss (av):{v_loss_2_t}, memory alloc (GiB): {(torch.cuda.memory_allocated(device)/ 1024**3)}")
-        torch.save(model.state_dict(), "model.pth")
+        #torch.save(model.state_dict(), "model.pth")
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict()
+        }, "checkpoint.pt")
+
+        progress_bar.close()
 
 if __name__ == '__main__':
     main()
