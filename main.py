@@ -24,30 +24,32 @@ import os
 #todo make a trainable transformation that allows collapsing of memory back to it's shape instead of (batch_size, shape). We can then unsequeeze in the next read/write
 #Remove token_dim and do embedder directly to embed_dim
 
-def create_new_token_data(tensor, seq_len):
+def create_new_token_data(tensor, seq_len, padding_id):
     total_len = tensor.shape[0]
     n = total_len - seq_len
 
     if seq_len >= total_len:
-        x = None
-        y = None
-    else:
-        x = [tensor[i:i+seq_len] for i in range(n)]
-        y = [tensor[i+seq_len] for i in range(n)]
+        padding_needed = seq_len - total_len +1
+        tensor = torch.cat([tensor, torch.full((padding_needed,), padding_id)], dim=0)
+        return [tensor[:-1]], [tensor[-1]]
+        
+
+    x = [tensor[i:i+seq_len] for i in range(max(n,1))]
+    y = [tensor[i+seq_len] for i in range(max(n,1))]
 
     return x, y
 
 def main():
-    token_dim = 768
+    token_dim = 512
     emb_dim = 256
-    hidden_dim = 128
+    hidden_dim = 256
     m_dim = 128
-    n_stacks = 3
+    n_stacks = 8
     n_heads = 8
     dropout = 0.1
     dict_size = 16384
 
-    batch_size = 64
+    batch_size = 32
     epochs = 10
     static_seq = 64
 
@@ -57,11 +59,12 @@ def main():
 
     encoder = nn.Sequential(nn.Embedding(dict_size, token_dim), LatentEmbedder(token_dim, emb_dim, hidden_dim=hidden_dim))
     model = ExampleModel(encoder, m_dim, token_dim, emb_dim, dict_size, hidden_dim, n_stacks, dropout, n_heads)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-5, weight_decay=0.001)
+   #optimizer = optim.Adam(model.parameters(), lr=1e-6)
 
     if os.path.exists("checkpoint.pt"):
         checkpoint = torch.load("checkpoint.pt")
-        model.memory = torch.zeros(state_dict["memory"].shape)
+        model.memory = torch.zeros(checkpoint['memory_shape'])
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         print("loaded model/optimizer from save")
@@ -83,7 +86,7 @@ def main():
     print(model(toy_input),model(toy_input2))
     '''
 
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train+test")
 
     tokenizer = Tokenizer(models.BPE())
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
@@ -97,13 +100,13 @@ def main():
     #pair="$A [EOS] $B:1 [EOS]:1",
     special_tokens=[("[EOS]", tokenizer.token_to_id("[EOS]"))]
     )
-
-
+    padding_id = tokenizer.token_to_id("[PAD]")
 
     x, y  = [], []
     for text in dataset["text"]:
         if len(text) > 0:
-            x_t, y_t = create_new_token_data(torch.tensor(tokenizer.encode(text).ids), static_seq)
+            x_t, y_t = create_new_token_data(torch.tensor(tokenizer.encode(text).ids), static_seq, padding_id)
+
             if x_t is not None:
                 x.append(x_t)
                 y.append(y_t)
@@ -133,7 +136,7 @@ def main():
 
 
 
-    token_loss = nn.CrossEntropyLoss()
+    token_loss = nn.CrossEntropyLoss( ignore_index=padding_id)
 
 
 
@@ -232,7 +235,8 @@ def main():
         #torch.save(model.state_dict(), "model.pth")
         torch.save({
             'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict()
+            'optimizer_state_dict': optimizer.state_dict(),
+            'memory_shape': model.memory.shape
         }, "checkpoint.pt")
 
         progress_bar.close()
